@@ -27,7 +27,8 @@ FAIL=0
 LAST_OUT=""
 
 # new_root <kernel-release> <os-id> <version-id>: create a fixture tree for
-# a host with nothing built in, loaded or blacklisted; print its path.
+# a typical host: algif_aead shipped as a loadable module (zstd, like
+# current Ubuntu), nothing built in, loaded or blacklisted. Print its path.
 # Runs in a $( ) subshell, so it cannot keep a counter: mktemp gives every
 # case its own tree.
 new_root() {
@@ -35,6 +36,9 @@ new_root() {
     r=$(mktemp -d "${TMP}/root.XXXXXX")
     mkdir -p "$r/etc/modprobe.d" "$r/lib/modules/$1" "$r/proc/1" "$r/boot"
     : > "$r/lib/modules/$1/modules.builtin"
+    : > "$r/lib/modules/$1/modules.dep"
+    mkdir -p "$r/lib/modules/$1/kernel/crypto"
+    : > "$r/lib/modules/$1/kernel/crypto/algif_aead.ko.zst"
     : > "$r/proc/cmdline"
     : > "$r/proc/1/environ"
     printf 'NAME="%s"\nID=%s\nVERSION_ID="%s"\n' "$2" "$2" "$3" > "$r/etc/os-release"
@@ -122,6 +126,31 @@ check "initcall_blacklist on a built-in module" "$r" 2 MITIGATED
 r=$(new_root 6.8.0-40-generic ubuntu 24.04)
 echo "install algif_aead /bin/false" > "$r/etc/modprobe.d/disable-algif.conf"
 check "modprobe.d rule but module still loaded" "$r" 1 VULNERABLE MOCK_LSMOD=algif_aead
+
+echo "Module availability"
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+echo "# CONFIG_CRYPTO_USER_API_AEAD is not set" > "$r/boot/config-6.8.0-40-generic"
+check "AEAD user API compiled out" "$r" 0 SAFE
+refute "compiled-out AEAD drops the upstream-range issue" 'lacks upstream fix'
+
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+echo "# CONFIG_CRYPTO_USER_API_AEAD is not set" > "$r/boot/config"
+check "compiled out per a generic /boot/config is not trusted" "$r" 1 VULNERABLE
+
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+rm "$r/lib/modules/6.8.0-40-generic/kernel/crypto/algif_aead.ko.zst"
+check "algif_aead.ko not installed" "$r" 2 MITIGATED
+
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+rm -r "$r/lib/modules/6.8.0-40-generic"
+check "no module tree (e.g. container) proves nothing" "$r" 1 VULNERABLE
+
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+check "kernel.modules_disabled=1, not loaded" "$r" 2 MITIGATED \
+    MOCK_SYSCTL_kernel_modules_disabled=1
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+check "kernel.modules_disabled=1 but already loaded" "$r" 1 VULNERABLE \
+    MOCK_SYSCTL_kernel_modules_disabled=1 MOCK_LSMOD=algif_aead
 
 echo "RHEL vendor kernels"
 r=$(new_root 4.18.0-553.121.1.el8_10.x86_64 almalinux 8.10)

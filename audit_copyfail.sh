@@ -203,22 +203,23 @@ case "$DISTRO_ID" in
     *)                info "Distribution $DISTRO_ID — manual patch verification required" ;;
 esac
 
-# A vendor kernel carrying the fix still sits inside the upstream range
-# checked in §2; drop that issue once a distro check marked the host SAFE.
-if [[ "$VULN_STATE" == "SAFE" ]]; then
-    _kept=()
+# _drop_range_issue: a host cleared by a later check (vendor fix, feature
+# compiled out) still sits inside the upstream range from §2; drop that issue.
+_drop_range_issue() {
+    local i kept=()
     for i in "${ISSUES[@]}"; do
-        [[ "$i" == "Kernel $KERNEL lacks upstream fix" ]] || _kept+=("$i")
+        [[ "$i" == "Kernel $KERNEL lacks upstream fix" ]] || kept+=("$i")
     done
-    ISSUES=("${_kept[@]+"${_kept[@]}"}")
-fi
+    ISSUES=("${kept[@]+"${kept[@]}"}")
+}
+if [[ "$VULN_STATE" == "SAFE" ]]; then _drop_range_issue; fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  §4  algif_aead MODULE STATUS
 # ─────────────────────────────────────────────────────────────────────────────
 header "4 · algif_aead Module"
 
-BUILTIN=false; LOADED=false
+BUILTIN=false; LOADED=false; AEAD_ABSENT=false; UNLOADABLE=false
 
 # ── Built-in check via modules.builtin ──
 if [[ -f "$ROOT"/lib/modules/"$(uname -r)"/modules.builtin ]]; then
@@ -244,7 +245,11 @@ if [[ -n "$CONFIG_FILE" ]]; then
     if   echo "$AEAD_CFG" | grep -q '=y'; then BUILTIN=true
     elif echo "$AEAD_CFG" | grep -q '=m'; then info "algif_aead is a loadable module (.ko)"
     elif echo "$AEAD_CFG" | grep -q 'NOT_FOUND'; then warn "CONFIG_CRYPTO_USER_API_AEAD not found in config"
-    else ok "CONFIG_CRYPTO_USER_API_AEAD not set — attack surface absent"
+    else
+        ok "CONFIG_CRYPTO_USER_API_AEAD not set — attack surface absent"
+        # Only trust a config that belongs to the running kernel; a generic
+        # /boot/config may be left over from another one.
+        if [[ "$CONFIG_FILE" != "$ROOT/boot/config" ]]; then AEAD_ABSENT=true; fi
     fi
 else
     warn "Kernel config not accessible (/proc/config.gz, /boot/config-*)"
@@ -256,6 +261,9 @@ if [[ "$BUILTIN" == "true" ]]; then
     fail "algif_aead is BUILT INTO the kernel (CONFIG_CRYPTO_USER_API_AEAD=y)"
     fail "modprobe.d blacklist will NOT work — initcall_blacklist= is required!"
     add_issue "algif_aead built-in: modprobe.d mitigation is ineffective"
+elif "$AEAD_ABSENT"; then
+    ok "algif_aead is not built for this kernel — Copy Fail cannot be reached"
+    if [[ "$VULN_STATE" != "SAFE" ]]; then VULN_STATE="SAFE"; _drop_range_issue; fi
 else
     info "algif_aead is a loadable kernel module"
 fi
@@ -267,6 +275,26 @@ if lsmod 2>/dev/null | grep -q '^algif_aead'; then
     add_issue "algif_aead module is active — exploit possible right now"
 elif [[ "$BUILTIN" == "false" ]]; then
     ok "algif_aead module is NOT loaded"
+fi
+
+# ── Loadable on demand? ──
+# Not being loaded is no mitigation by itself: binding an AF_ALG "aead"
+# socket autoloads algif_aead. It only counts when the module cannot load.
+if ! "$BUILTIN" && ! "$LOADED" && ! "$AEAD_ABSENT"; then
+    if [[ "$(sysctl -n kernel.modules_disabled 2>/dev/null || true)" == "1" ]]; then
+        UNLOADABLE=true
+        ok "kernel.modules_disabled=1 — algif_aead cannot be loaded until reboot"
+        add_mitigation "kernel.modules_disabled=1 (resets on reboot)"
+    elif [[ -f "$ROOT/lib/modules/$KERNEL/modules.dep" ]] && \
+         [[ -z "$(find "$ROOT/lib/modules/$KERNEL" -name 'algif_aead.ko*' -print -quit 2>/dev/null)" ]]; then
+        # Requires modules.dep, so a container without the host's module
+        # tree is not mistaken for a kernel that lacks the module.
+        UNLOADABLE=true
+        ok "algif_aead.ko not installed for this kernel — cannot be loaded"
+        add_mitigation "algif_aead module not installed (a kernel modules package would add it back)"
+    else
+        info "algif_aead can be autoloaded on demand (AF_ALG aead socket)"
+    fi
 fi
 
 # ── AF_ALG active processes ──
@@ -419,7 +447,8 @@ printf "  Kernel: %s\n\n" "$KERNEL"
 if [[ "$VULN_STATE" != "SAFE" ]]; then
     # A modprobe.d rule only stops future loads: it neither affects a
     # built-in module nor unloads one that is already in memory.
-    if "$BLACKLISTED_CMDLINE" || ( "$BLACKLISTED_MODPROBE" && ! "$BUILTIN" && ! "$LOADED" ); then
+    if "$BLACKLISTED_CMDLINE" || "$UNLOADABLE" || \
+       ( "$BLACKLISTED_MODPROBE" && ! "$BUILTIN" && ! "$LOADED" ); then
         VULN_STATE="MITIGATED"
     fi
 fi
