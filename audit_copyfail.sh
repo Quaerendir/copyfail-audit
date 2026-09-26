@@ -2,8 +2,8 @@
 # =============================================================================
 #  audit_copyfail.sh — CVE-2026-31431 "Copy Fail" Audit Script
 #  Author  : Quaerendir
-#  Version : 1.0.0
-#  Date    : 2026-05-01
+#  Version : 1.1.0
+#  Date    : 2026-09-26
 #  License : MIT
 #  Repo    : https://github.com/Quaerendir/copyfail-audit
 #
@@ -76,7 +76,7 @@ cat <<'BANNER'
   ╚═════╝ ╚═════╝ ╚═╝        ╚═╝       ╚═╝     ╚═╝  ╚═╝╚═╝╚══════╝
 BANNER
 printf "${RESET}"
-printf "  ${BOLD}CVE-2026-31431 \"Copy Fail\" — Linux Kernel LPE Audit v1.0.0${RESET}\n"
+printf "  ${BOLD}CVE-2026-31431 \"Copy Fail\" — Linux Kernel LPE Audit v1.1.0${RESET}\n"
 printf "  ${DIM}Disclosed 2026-04-29 | CVSS 7.8 HIGH | algif_aead + authencesn + splice()${RESET}\n\n"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -541,7 +541,7 @@ cat <<REMED
 
 REMED
 
-printf "  ${DIM}audit_copyfail.sh v1.0.0 — github.com/Quaerendir/copyfail-audit${RESET}\n\n"
+printf "  ${DIM}audit_copyfail.sh v1.1.0 — github.com/Quaerendir/copyfail-audit${RESET}\n\n"
 
 # ── Exit code ──
 case "$VULN_STATE" in
