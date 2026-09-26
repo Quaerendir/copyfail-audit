@@ -197,7 +197,7 @@ esac
 # ─────────────────────────────────────────────────────────────────────────────
 header "4 · algif_aead Module"
 
-BUILTIN=false; LOADED=false
+BUILTIN=false
 
 # ── Built-in check via modules.builtin ──
 if [[ -f /lib/modules/"$(uname -r)"/modules.builtin ]]; then
@@ -235,14 +235,12 @@ if [[ "$BUILTIN" == "true" ]]; then
     fail "algif_aead is BUILT INTO the kernel (CONFIG_CRYPTO_USER_API_AEAD=y)"
     fail "modprobe.d blacklist will NOT work — initcall_blacklist= is required!"
     add_issue "algif_aead built-in: modprobe.d mitigation is ineffective"
-    LOADED=true
 else
     info "algif_aead is a loadable kernel module"
 fi
 
 # ── lsmod ──
 if lsmod 2>/dev/null | grep -q '^algif_aead'; then
-    LOADED=true
     fail "algif_aead is currently LOADED"
     add_issue "algif_aead module is active — exploit possible right now"
 elif [[ "$BUILTIN" == "false" ]]; then
