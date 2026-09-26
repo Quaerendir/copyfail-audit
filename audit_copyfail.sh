@@ -313,15 +313,18 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 header "5 · Mitigation Status"
 
-BLACKLISTED_MODPROBE=false; BLACKLISTED_CMDLINE=false
+BLACKLISTED_MODPROBE=false; BLACKLISTED_CMDLINE=false; BLACKLIST_ONLY=false
 
 # ── 5a: modprobe.d ──
 printf "\n  ${BOLD}[a] modprobe.d blacklist${RESET}\n\n"
+# Only an install override stops the autoload: af_alg requests the module by
+# name ("algif-aead" = algif_aead; it has no alias), and a `blacklist` line
+# only disables a module's aliases (modprobe.d(5)), in every kernel 4.14-7.0.
 for modconf in "$ROOT"/etc/modprobe.d/*.conf; do
     [[ -f "$modconf" ]] || continue
-    if grep -qP '^(blacklist|install)\s+algif_aead' "$modconf" 2>/dev/null; then
+    if grep -qP '^install\s+algif_aead\s+(/usr)?/bin/(true|false)\b' "$modconf" 2>/dev/null; then
         BLACKLISTED_MODPROBE=true
-        rule=$(grep -P '^(blacklist|install)\s+algif_aead' "$modconf" | head -1)
+        rule=$(grep -P '^install\s+algif_aead\b' "$modconf" | head -1 || true)
         ok "Rule found in $modconf: ${rule}"
         [[ "$BUILTIN" == "true" ]] && { \
             fail "  BUT: module is built-in — this rule has NO EFFECT!"; \
@@ -329,9 +332,14 @@ for modconf in "$ROOT"/etc/modprobe.d/*.conf; do
         [[ "$BUILTIN" == "false" && "$LOADED" == "true" ]] && { \
             fail "  BUT: algif_aead is still loaded — rmmod required"; \
             add_issue "modprobe.d rule present but algif_aead still loaded"; }
+    elif grep -qP '^blacklist\s+algif_aead\b' "$modconf" 2>/dev/null; then
+        BLACKLIST_ONLY=true
+        warn "Rule found in $modconf: blacklist algif_aead — does NOT stop autoload"
+        info "  algif_aead is loaded by name; 'blacklist' only disables aliases"
+        add_issue "Ineffective mitigation: 'blacklist algif_aead' — use 'install algif_aead /bin/false'"
     fi
 done
-[[ "$BLACKLISTED_MODPROBE" == "false" ]] && {
+[[ "$BLACKLISTED_MODPROBE" == "false" && "$BLACKLIST_ONLY" == "false" ]] && {
     [[ "$BUILTIN" == "true" ]] && info "modprobe.d not applicable (built-in module)" || \
         warn "No blacklist/install rule found in /etc/modprobe.d/ for algif_aead"
 }

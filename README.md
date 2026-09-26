@@ -113,7 +113,7 @@ esac
 | Distro patch level | RPM/DEB package version vs patched release per distro |
 | `algif_aead` module state | Loaded, built-in (`CONFIG_CRYPTO_USER_API_AEAD=y`), or absent |
 | Kernel config | Reads `/proc/config.gz` or `/boot/config-$(uname -r)` |
-| `modprobe.d` blacklist | Detects rule presence AND warns if built-in (rule is useless) |
+| `modprobe.d` install override | Counts only `install algif_aead /bin/false`; warns if built-in or still loaded (rule is useless). A bare `blacklist algif_aead` is flagged as ineffective |
 | `initcall_blacklist=` cmdline | The only effective mitigation for built-in modules |
 | GRUB persistence | Verifies the mitigation will survive reboot |
 | Active AF_ALG users | `lsof` for processes currently using the interface |
@@ -147,7 +147,11 @@ zypper update kernel-default
 pacman -Syu linux
 ```
 
-### Option B — Blacklist module (loadable `.ko` only)
+### Option B — Block module loading (loadable `.ko` only)
+
+Use `install ... /bin/false`, not `blacklist`: the kernel requests `algif_aead`
+by name, and `blacklist` only disables a module's aliases, so it does not stop
+the autoload.
 
 ```bash
 echo "install algif_aead /bin/false" > /etc/modprobe.d/disable-algif.conf

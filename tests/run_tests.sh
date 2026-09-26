@@ -114,6 +114,15 @@ echo "install algif_aead /bin/false" > "$r/etc/modprobe.d/disable-algif.conf"
 check "modprobe.d rule on a built-in module is no mitigation" "$r" 1 VULNERABLE
 
 r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+echo "blacklist algif_aead" > "$r/etc/modprobe.d/blacklist-algif.conf"
+check "blacklist alone does not stop the by-name autoload" "$r" 1 VULNERABLE
+refute "blacklist alone is not listed as a mitigation" 'No blacklist/install rule found'
+
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
+printf 'blacklist algif_aead\ninstall algif_aead /bin/true\n' > "$r/etc/modprobe.d/disable-algif.conf"
+check "blacklist plus install /bin/true" "$r" 2 MITIGATED
+
+r=$(new_root 6.8.0-40-generic ubuntu 24.04)
 echo "CONFIG_CRYPTO_USER_API_AEAD=y" > "$r/boot/config-6.8.0-40-generic"
 echo "install algif_aead /bin/false" > "$r/etc/modprobe.d/disable-algif.conf"
 check "built-in detected from kernel config" "$r" 1 VULNERABLE
