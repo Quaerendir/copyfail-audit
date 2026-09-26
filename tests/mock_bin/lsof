@@ -1,0 +1,3 @@
+#!/bin/bash
+# Mock lsof: no open AF_ALG sockets.
+exit 0

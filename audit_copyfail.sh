@@ -33,6 +33,15 @@ set -euo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
+# Test hooks: tests/run_tests.sh prepends mock commands to PATH and points
+# ROOT at a fixture tree holding the system files read below. Never honoured
+# for root, so a real audit always sees the pinned PATH and the real system.
+ROOT=""
+if [[ $EUID -ne 0 ]]; then
+    if [[ -n "${COPYFAIL_TEST_PATH:-}" ]]; then PATH="${COPYFAIL_TEST_PATH}:$PATH"; fi
+    ROOT="${COPYFAIL_TEST_ROOT:-}"
+fi
+
 # ─── Colours ──────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; YELLOW='\033[1;33m'; GREEN='\033[0;32m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; RESET='\033[0m'
@@ -83,11 +92,14 @@ KVER_MINOR=$(cut -d. -f2 <<< "$KERNEL")
 KVER_PATCH=$(cut -d. -f3 <<< "$KERNEL" | grep -oP '^\d+' || echo 0)
 
 DISTRO_NAME="unknown"; DISTRO_ID="unknown"; DISTRO_VERSION="0"
-if [[ -f /etc/os-release ]]; then
-    source /etc/os-release
-    DISTRO_NAME="${NAME:-unknown} ${VERSION_ID:-}"
-    DISTRO_ID="${ID:-unknown}"
-    DISTRO_VERSION="${VERSION_ID:-0}"
+if [[ -r "$ROOT/etc/os-release" ]]; then
+    # Parsed as plain key=value text, not sourced — /etc/os-release is
+    # shell syntax and sourcing it would execute arbitrary embedded code.
+    _osrel() { sed -n "/^$1=/{s///;s/^[\"']//;s/[\"']\$//;p;q;}" "$ROOT/etc/os-release"; }
+    OS_NAME=$(_osrel NAME); OS_ID=$(_osrel ID); OS_VERSION_ID=$(_osrel VERSION_ID)
+    DISTRO_NAME="${OS_NAME:-unknown} ${OS_VERSION_ID}"
+    DISTRO_ID="${OS_ID:-unknown}"
+    DISTRO_VERSION="${OS_VERSION_ID:-0}"
 fi
 
 info "Hostname   : $HOSTNAME_FQDN"
@@ -130,39 +142,38 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 header "3 · Distribution Patch Status"
 
+# _vendor_patched <upstream-base> <fixed-build>: true if the running kernel is
+# <upstream-base>-<build> with the full build number (e.g. 553.121.1) at or
+# above <fixed-build>. Comparing only the first field would treat
+# 611.1.1 as >= 611.49.2.
+_vendor_patched() {
+    local build
+    build=$(uname -r | grep -oP "^\Q$1\E-\K[0-9]+(\.[0-9]+)*" || true)
+    [[ -n "$build" ]] && \
+        [[ "$(printf '%s\n' "$2" "$build" | sort -V | head -1)" == "$2" ]]
+}
+
 _rhel_check() {
     command -v rpm &>/dev/null || return
-    local kpkg ver_major patched=false
+    local kpkg ver_major base fixed label
     kpkg=$(rpm -q kernel 2>/dev/null | grep "$(uname -r)" | head -1 || true)
     [[ -n "$kpkg" ]] && info "Installed kernel RPM: $kpkg"
     ver_major="${DISTRO_VERSION%%.*}"
 
     case "$ver_major" in
-        8)
-            local n
-            n=$(uname -r | grep -oP '4\.18\.0-\K\d+' || echo 0)
-            if (( n > 553 )); then patched=true
-            elif (( n == 553 )); then
-                local s; s=$(uname -r | grep -oP '553\.\K\d+' || echo 0)
-                (( s >= 121 )) && patched=true
-            fi
-            "$patched" && ok  "RHEL/AlmaLinux 8: kernel ≥ 4.18.0-553.121.1.el8_10 — PATCHED" || \
-                         fail "RHEL/AlmaLinux 8: needs kernel ≥ 4.18.0-553.121.1.el8_10"; $patched || add_issue "RHEL8 kernel unpatched"
-            ;;
-        9)
-            local n; n=$(uname -r | grep -oP '5\.14\.0-\K\d+' || echo 0)
-            (( n >= 611 )) && patched=true
-            "$patched" && ok  "RHEL/AlmaLinux 9: kernel ≥ 5.14.0-611.49.2.el9_7 — PATCHED" || \
-                         fail "RHEL/AlmaLinux 9: needs kernel ≥ 5.14.0-611.49.2.el9_7"; $patched || add_issue "RHEL9 kernel unpatched"
-            ;;
-        10)
-            local n; n=$(uname -r | grep -oP '6\.12\.0-\K\d+' || echo 0)
-            (( n >= 124 )) && patched=true
-            "$patched" && ok  "RHEL/AlmaLinux 10: kernel ≥ 6.12.0-124.52.2.el10_1 — PATCHED" || \
-                         fail "RHEL/AlmaLinux 10: needs kernel ≥ 6.12.0-124.52.2.el10_1"; $patched || add_issue "RHEL10 kernel unpatched"
-            ;;
-        *)  info "RHEL family v$ver_major — no specific patched version on record yet" ;;
+        8)  base=4.18.0; fixed=553.121.1; label="4.18.0-553.121.1.el8_10" ;;
+        9)  base=5.14.0; fixed=611.49.2;  label="5.14.0-611.49.2.el9_7" ;;
+        10) base=6.12.0; fixed=124.52.2;  label="6.12.0-124.52.2.el10_1" ;;
+        *)  info "RHEL family v$ver_major — no specific patched version on record yet"
+            return ;;
     esac
+    if _vendor_patched "$base" "$fixed"; then
+        ok "RHEL/AlmaLinux $ver_major: kernel ≥ $label — PATCHED"
+        VULN_STATE="SAFE"
+    else
+        fail "RHEL/AlmaLinux $ver_major: needs kernel ≥ $label"
+        add_issue "RHEL$ver_major kernel unpatched"
+    fi
 }
 
 _deb_check() {
@@ -192,23 +203,33 @@ case "$DISTRO_ID" in
     *)                info "Distribution $DISTRO_ID — manual patch verification required" ;;
 esac
 
+# A vendor kernel carrying the fix still sits inside the upstream range
+# checked in §2; drop that issue once a distro check marked the host SAFE.
+if [[ "$VULN_STATE" == "SAFE" ]]; then
+    _kept=()
+    for i in "${ISSUES[@]}"; do
+        [[ "$i" == "Kernel $KERNEL lacks upstream fix" ]] || _kept+=("$i")
+    done
+    ISSUES=("${_kept[@]+"${_kept[@]}"}")
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  §4  algif_aead MODULE STATUS
 # ─────────────────────────────────────────────────────────────────────────────
 header "4 · algif_aead Module"
 
-BUILTIN=false
+BUILTIN=false; LOADED=false
 
 # ── Built-in check via modules.builtin ──
-if [[ -f /lib/modules/"$(uname -r)"/modules.builtin ]]; then
-    if grep -q 'algif_aead' /lib/modules/"$(uname -r)"/modules.builtin 2>/dev/null; then
+if [[ -f "$ROOT"/lib/modules/"$(uname -r)"/modules.builtin ]]; then
+    if grep -q 'algif_aead' "$ROOT"/lib/modules/"$(uname -r)"/modules.builtin 2>/dev/null; then
         BUILTIN=true
     fi
 fi
 
 # ── Built-in check via kernel config ──
 CONFIG_FILE=""
-for f in /proc/config.gz "/boot/config-$(uname -r)" /boot/config; do
+for f in "$ROOT/proc/config.gz" "$ROOT/boot/config-$(uname -r)" "$ROOT/boot/config"; do
     [[ -f "$f" ]] && { CONFIG_FILE="$f"; break; }
 done
 
@@ -241,6 +262,7 @@ fi
 
 # ── lsmod ──
 if lsmod 2>/dev/null | grep -q '^algif_aead'; then
+    LOADED=true
     fail "algif_aead is currently LOADED"
     add_issue "algif_aead module is active — exploit possible right now"
 elif [[ "$BUILTIN" == "false" ]]; then
@@ -267,7 +289,7 @@ BLACKLISTED_MODPROBE=false; BLACKLISTED_CMDLINE=false
 
 # ── 5a: modprobe.d ──
 printf "\n  ${BOLD}[a] modprobe.d blacklist${RESET}\n\n"
-for modconf in /etc/modprobe.d/*.conf; do
+for modconf in "$ROOT"/etc/modprobe.d/*.conf; do
     [[ -f "$modconf" ]] || continue
     if grep -qP '^(blacklist|install)\s+algif_aead' "$modconf" 2>/dev/null; then
         BLACKLISTED_MODPROBE=true
@@ -276,6 +298,9 @@ for modconf in /etc/modprobe.d/*.conf; do
         [[ "$BUILTIN" == "true" ]] && { \
             fail "  BUT: module is built-in — this rule has NO EFFECT!"; \
             add_issue "False mitigation: modprobe.d rule on built-in module"; }
+        [[ "$BUILTIN" == "false" && "$LOADED" == "true" ]] && { \
+            fail "  BUT: algif_aead is still loaded — rmmod required"; \
+            add_issue "modprobe.d rule present but algif_aead still loaded"; }
     fi
 done
 [[ "$BLACKLISTED_MODPROBE" == "false" ]] && {
@@ -285,7 +310,7 @@ done
 
 # ── 5b: kernel cmdline ──
 printf "\n  ${BOLD}[b] Kernel cmdline (initcall_blacklist)${RESET}\n\n"
-CMDLINE=$(cat /proc/cmdline 2>/dev/null || true)
+CMDLINE=$(cat "$ROOT/proc/cmdline" 2>/dev/null || true)
 info "Active cmdline: $CMDLINE"
 
 if grep -q 'initcall_blacklist=.*algif_aead_init' <<< "$CMDLINE"; then
@@ -302,7 +327,7 @@ fi
 # ── 5c: GRUB persistence ──
 printf "\n  ${BOLD}[c] Mitigation persistence (GRUB)${RESET}\n\n"
 GRUB_FOUND=false
-for grubcfg in /etc/default/grub /boot/grub2/grub.cfg /boot/grub/grub.cfg; do
+for grubcfg in "$ROOT/etc/default/grub" "$ROOT/boot/grub2/grub.cfg" "$ROOT/boot/grub/grub.cfg"; do
     [[ -f "$grubcfg" ]] || continue
     if grep -q 'initcall_blacklist=.*algif_aead' "$grubcfg" 2>/dev/null; then
         ok "initcall_blacklist found in $grubcfg — survives reboot"
@@ -336,7 +361,7 @@ _sysctl_check "kernel.unprivileged_userns_clone" "unprivileged user namespaces"
 info "Note: CopyFail does NOT require user namespaces — only a local shell"
 
 sep
-LOCKDOWN=$(cat /sys/kernel/security/lockdown 2>/dev/null || echo "N/A")
+LOCKDOWN=$(cat "$ROOT/sys/kernel/security/lockdown" 2>/dev/null || echo "N/A")
 if [[ "$LOCKDOWN" == "N/A" ]]; then warn "Kernel lockdown: not available"
 else info "Kernel lockdown: $LOCKDOWN"; fi
 
@@ -350,8 +375,8 @@ if command -v getenforce &>/dev/null; then
     [[ "$SE_STATUS" == "Enforcing" ]] && \
         { ok "SELinux: Enforcing (additional containment layer)"; add_mitigation "SELinux Enforcing"; } || \
         warn "SELinux: $SE_STATUS"
-elif [[ -f /sys/module/apparmor/parameters/enabled ]]; then
-    AA=$(cat /sys/module/apparmor/parameters/enabled)
+elif [[ -f "$ROOT/sys/module/apparmor/parameters/enabled" ]]; then
+    AA=$(cat "$ROOT/sys/module/apparmor/parameters/enabled")
     [[ "$AA" == "Y" ]] && \
         { ok "AppArmor: active"; add_mitigation "AppArmor active"; } || \
         warn "AppArmor: inactive"
@@ -365,8 +390,8 @@ fi
 header "8 · Container / Kubernetes Context"
 
 IN_CONTAINER=false
-[[ -f /.dockerenv ]] && { IN_CONTAINER=true; warn "Running INSIDE a Docker container"; }
-grep -q 'container=podman\|container=lxc' /proc/1/environ 2>/dev/null && \
+[[ -f "$ROOT/.dockerenv" ]] && { IN_CONTAINER=true; warn "Running INSIDE a Docker container"; }
+grep -q 'container=podman\|container=lxc' "$ROOT/proc/1/environ" 2>/dev/null && \
     { IN_CONTAINER=true; warn "Running inside a container (podman/lxc)"; }
 
 if "$IN_CONTAINER"; then
@@ -376,7 +401,7 @@ else
     ok "Not running inside a detected container"
 fi
 
-if command -v kubectl &>/dev/null || [[ -f /var/run/secrets/kubernetes.io/serviceaccount/token ]]; then
+if command -v kubectl &>/dev/null || [[ -f "$ROOT/var/run/secrets/kubernetes.io/serviceaccount/token" ]]; then
     warn "Kubernetes environment detected — prioritize patching all nodes!"
     add_issue "Kubernetes node detected — shared page cache risk across pods"
 fi
@@ -392,7 +417,9 @@ printf "  Kernel: %s\n\n" "$KERNEL"
 
 # Refine state based on mitigation
 if [[ "$VULN_STATE" != "SAFE" ]]; then
-    if "$BLACKLISTED_CMDLINE" || ( "$BLACKLISTED_MODPROBE" && ! "$BUILTIN" ); then
+    # A modprobe.d rule only stops future loads: it neither affects a
+    # built-in module nor unloads one that is already in memory.
+    if "$BLACKLISTED_CMDLINE" || ( "$BLACKLISTED_MODPROBE" && ! "$BUILTIN" && ! "$LOADED" ); then
         VULN_STATE="MITIGATED"
     fi
 fi
