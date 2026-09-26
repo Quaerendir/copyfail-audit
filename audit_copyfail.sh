@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # =============================================================================
 #  audit_copyfail.sh — CVE-2026-31431 "Copy Fail" Audit Script
 #  Author  : Quaerendir
